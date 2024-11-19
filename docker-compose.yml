@@ -1,0 +1,247 @@
+version: '3.8'
+
+services:
+  # Zookeeper
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "52181:2181"
+    networks:
+      - eureka-network
+    healthcheck:
+      test: [ "CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka Broker
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka-broker
+    depends_on:
+      - zookeeper
+    ports:
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - eureka-network
+    healthcheck:
+      test: ["CMD-SHELL", "echo stat | nc zookeeper 2181 | grep Mode"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka Connect (Debezium)
+  kafka_connect:
+    container_name: kafka_connect
+    image: debezium/connect:2.0
+    ports:
+      - '8084:8083'
+    environment:
+      - BOOTSTRAP_SERVERS=kafka:9093
+      - GROUP_ID=medium_debezium
+      - CONFIG_STORAGE_TOPIC=my_connect_configs
+      - OFFSET_STORAGE_TOPIC=my_connect_offsets
+      - STATUS_STORAGE_TOPIC=my_connect_statuses
+    links:
+      - kafka
+      - order-db
+    networks:
+      - eureka-network
+
+  # Kafka UI
+  kafka-ui:
+    container_name: kafka-ui
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - "9091:8080"
+    restart: always
+    depends_on:
+      - kafka
+      - zookeeper
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=local
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9093
+      - KAFKA_CLUSTERS_0_ZOOKEEPER=zookeeper:2181
+    networks:
+      - eureka-network
+
+  # Eureka Server
+  eureka-server:
+    build:
+      context: ./eureka-server
+      dockerfile: Dockerfile
+    ports:
+      - "8761:8761"
+    container_name: eureka-server
+    environment:
+      - SPRING_APPLICATION_NAME=eureka-server
+      - EUREKA_CLIENT_REGISTERWITHEUREKA=false
+      - EUREKA_CLIENT_FETCHREGISTRY=false
+    networks:
+      - eureka-network
+
+  # Order Service
+  order-service:
+    build:
+      context: ./order-service
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8080"
+    container_name: order-service
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://order-db:5432/order_service_db
+      - SPRING_DATASOURCE_USERNAME=user
+      - SPRING_DATASOURCE_PASSWORD=password
+      - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+      - eureka.client.service-url.defaultZone=http://eureka-server:8761/eureka
+    depends_on:
+      - eureka-server
+      - order-db
+    networks:
+      - eureka-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d order_service_db"]
+      interval: 30s
+      retries: 5
+      start_period: 10s
+      timeout: 10s
+
+  # Invoice Service
+  invoice-service:
+    build:
+      context: ./invoice-service
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8080"
+    container_name: invoice-service
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://invoice-db:5432/invoice_service_db
+      - SPRING_DATASOURCE_USERNAME=user
+      - SPRING_DATASOURCE_PASSWORD=password
+      - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+    depends_on:
+      - invoice-db
+    networks:
+      - eureka-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d invoice_service_db"]
+      interval: 30s
+      retries: 5
+      start_period: 10s
+      timeout: 10s
+
+  # Product Service
+  product-service:
+    build:
+      context: ./product-service
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8080"
+    container_name: product-service
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://product-db:5432/product_service_db
+      - SPRING_DATASOURCE_USERNAME=user
+      - SPRING_DATASOURCE_PASSWORD=password
+      - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+      - eureka.client.service-url.defaultZone=http://eureka-server:8761/eureka
+    depends_on:
+      - eureka-server
+      - product-db
+    networks:
+      - eureka-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d product_service_db"]
+      interval: 30s
+      retries: 5
+      start_period: 10s
+      timeout: 10s
+
+  # PostgreSQL for Order Service
+  order-db:
+    image: postgres:latest
+    container_name: order-db
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: order_service_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./order-service/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4", "-c", "max_wal_senders=4"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d order_service_db"]
+      interval: 30s
+      retries: 5
+      start_period: 10s
+      timeout: 10s
+    networks:
+      - eureka-network
+
+  # PostgreSQL for Invoice Service
+  invoice-db:
+    image: postgres:latest
+    container_name: invoice-db
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: invoice_service_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./invoice-service/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d invoice_service_db"]
+      interval: 30s
+      retries: 5
+      start_period: 10s
+      timeout: 10s
+    networks:
+      - eureka-network
+
+  # PostgreSQL for Product Service
+  product-db:
+    image: postgres:latest
+    container_name: product-db
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: product_service_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - ./product-service/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d product_service_db"]
+      interval: 30s
+      retries: 5
+      start_period: 10s
+      timeout: 10s
+    networks:
+      - eureka-network
+
+  # Adminer (Web-based DB management tool)
+  adminer:
+    image: adminer
+    container_name: adminer
+    restart: always
+    ports:
+      - "8085:8080"
+    networks:
+      - eureka-network
+
+networks:
+  eureka-network:
+    driver: bridge
